@@ -10,7 +10,6 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-import pickle
 import pathlib
 import numpy as np
 import torch
@@ -19,7 +18,7 @@ from torch import optim
 from torch.optim import lr_scheduler 
 from torch.utils.data import DataLoader
 from sklearn.metrics.pairwise import cosine_similarity
-# from torchviz import make_dot
+from torchviz import make_dot
 import os
 import time
 
@@ -419,65 +418,128 @@ def partition_adv_sessions_by_original_ipd(adv_sessions, delta, win_size,n_wins,
     return partitioned_data
 
 # 放置在 partition_adv_sessions_by_ipd 函数之前
+def differentiable_sample_1d(data, query_indices):
+    """
+    从 data 中采样 query_indices 指定的位置 (支持浮点数索引)。
+    
+    参数:
+        data: [length] 原始数据 (session_ipd 或 session_size)
+        query_indices: [output_len] 我们想要采样的位置索引 (可以是浮点数)
+        
+    返回:
+        sampled_data: [output_len] 采样结果，保留了对 query_indices 的梯度
+    """
+    length = data.size(0)
+    
+    # 1. 找到左右整数索引
+    # floor() 不可导，但 data[idx] 的内容梯度可以传；
+    # 关键在于后面的 alpha 权重计算，它保留了位置梯度。
+    idx_floor = query_indices.floor().long()
+    idx_ceil = idx_floor + 1
+    
+    # 2. 处理越界情况 (Clamp防止报错)
+    idx_floor_clamped = idx_floor.clamp(0, length - 1)
+    idx_ceil_clamped = idx_ceil.clamp(0, length - 1)
+    
+    # 3. 获取左右两边的实际数值
+    val_floor = data[idx_floor_clamped]
+    val_ceil = data[idx_ceil_clamped]
+    
+    # 4. 计算插值权重 alpha (这是梯度回传的关键!)
+    # 如果 query_index 从 5.4 变成 5.5，alpha 变大，result 就会更偏向 val_ceil
+    alpha = query_indices - idx_floor.float() # alpha range: [0, 1]
+    
+    # 5. 线性插值
+    sampled_data = val_floor * (1 - alpha) + val_ceil * alpha
+    
+    # 6. 掩码处理：对于原本就在数组范围之外的索引，强制置为 0
+    # 使用 detach() 避免对 mask 求导 (mask 只是为了去掉无效数据)
+    mask = (query_indices >= 0) & (query_indices < length - 1)
+    mask = mask.float().detach()
+    
+    return sampled_data * mask
+
 def partition_adv_sessions_differentiable(adv_sessions, delta, win_size, n_wins, tor_len, device):
     """
-    partition_adv_sessions_by_ipd 的可微版本。
+    完全可微的窗口划分函数。
     """
-    win_size_ms = win_size * 1000  # 将 win_size 转换为毫秒
-    delta_ms = delta * 1000  # 将 delta 转换为毫秒
-    offset = win_size_ms - delta_ms  # 计算窗口的偏移量
+    win_size_ms = win_size * 1000
+    delta_ms = delta * 1000
+    offset = win_size_ms - delta_ms
 
     partitioned_data = []
     
+    # 实例化您的可微搜索类
     differentiable_search = DifferentiableSearchsorted.apply
     
+    # 预生成一个 0 到 tor_len-1 的网格，用于相对索引
+    # 这代表我们在每个窗口中想要采样的点数
+    base_grid = torch.arange(tor_len, dtype=torch.float32, device=device)
+    
     for session in adv_sessions:
+        partitioned_data_single = []
         
-        partitioned_data_sigle = []  #单独一个会话的
+        session_ipd = session[0, :]
+        session_size = session[1, :]
         
-        session_ipd = session[0, :]  # IPD 数据（毫秒）
-        session_size = session[1, :]  # size 数据
-        session_length = session_ipd.shape[0]
-
-        # 累积 IPD 得到绝对时间（毫秒）
+        # 累积时间 (梯度源头之一)
         cumulative_time = session_ipd.abs().cumsum(dim=0)
 
         for wi in range(int(n_wins)):
+            # 1. 计算目标时间范围
             start_time = torch.tensor(float(wi * offset), device=device)
             end_time = torch.tensor(float(start_time + win_size_ms), device=device)
 
-            start_idx = differentiable_search(cumulative_time, start_time).long()
-            end_idx = differentiable_search(cumulative_time, end_time).long()
-
-            # 提取窗口内的 IPD 和 size 数据
-            #原论文数据处理也是ipd数据不够才补充size（疑问）
-            # if end_idx > 500:
-            #     end_idx = 500
-            window_ipd = session_ipd[start_idx:end_idx]
-            window_size = session_size[start_idx:end_idx]
-
-            # 将每个窗口的 IPD 第一个元素改为 0
-            if len(window_ipd) > 0:
-                window_ipd = torch.cat([torch.tensor([0.0]).to(device), window_ipd[1:]])
-
-            # 将 IPD 和 size 数据连接在一起
-            window = torch.cat([window_ipd, window_size])
-
-            # 如果窗口内的数据不足，填充零
-            if window.shape[0] < tor_len * 2:
-                padding = torch.zeros(tor_len * 2 - window.shape[0]).to(device)
-                window = torch.cat([window, padding])
-
-            # 确保窗口数据长度为 tor_len * 2
-            window = window[:tor_len * 2]
-
-            partitioned_data_sigle.append(window)
+            # 2. 获取【浮点数】索引 (梯度源头之二)
+            # 注意：这里千万不要加 .long()，保留 float 类型！
+            start_idx_float = differentiable_search(cumulative_time, start_time)
+            end_idx_float = differentiable_search(cumulative_time, end_time)
             
-        partitioned_data_sigle =torch.stack(partitioned_data_sigle,dim = 0)  #将一个会话的所有窗口堆叠成一个张量
-        partitioned_data.append(partitioned_data_sigle)
-    # 将所有会话堆叠成一个张量
-    partitioned_data = torch.stack(partitioned_data,dim = 0)    #[batch_size,n_wins, tor_len * 2]
+            # 3. 构建采样坐标系 (Sampling Grid)
+            # 我们从 start_idx_float 开始，往后采 tor_len 个点
+            # 比如 start 是 5.4，我们采 5.4, 6.4, 7.4 ...
+            sample_indices = start_idx_float + base_grid
+            
+            # 4. 执行可微采样 (替代硬切片)
+            window_ipd = differentiable_sample_1d(session_ipd, sample_indices)
+            window_size = differentiable_sample_1d(session_size, sample_indices)
+            
+            # 5. 处理 end_time 的约束 (关键步骤)
+            # 硬切片时，数据只取到 end_idx。现在我们采了 tor_len 个点，可能超出了 end_idx。
+            # 我们用 Soft Mask 把超出 end_idx_float 的部分“压”为 0。
+            # 这样 end_idx_float 的梯度也能发生作用！
+            valid_mask = torch.sigmoid((end_idx_float - sample_indices) * 10.0) # 10.0 是 steepness
+            
+            window_ipd = window_ipd * valid_mask
+            window_size = window_size * valid_mask
 
+            # 6. 修正第一个元素 (保持原逻辑：将窗口内第一个 IPD 置 0)
+            # 为了保持可微，我们不能直接赋值 window_ipd[0] = 0
+            # 而是生成一个 mask：[0, 1, 1, 1...]
+            zero_mask = torch.ones_like(window_ipd)
+            zero_mask[0] = 0.0
+            window_ipd = window_ipd * zero_mask
+            
+            # 7. 拼接
+            window = torch.cat([window_ipd, window_size])
+            
+            # 8. 填充 (Padding)
+            # 在采样法中，我们实际上已经固定采了 tor_len 个点。
+            # 如果 sample_indices 超出了 session 长度，sample_1d 函数会自动置 0。
+            # 所以我们得到的结果长度天然就是 tor_len，不需要额外的 padding 逻辑！
+            # 但为了保险起见，或者如果您原本逻辑是 padding 到 tor_len*2：
+            if window.shape[0] < tor_len * 2:
+                 padding = torch.zeros(tor_len * 2 - window.shape[0], device=device)
+                 window = torch.cat([window, padding])
+            else:
+                 window = window[:tor_len * 2] # 确保长度一致
+
+            partitioned_data_single.append(window)
+            
+        partitioned_data_single = torch.stack(partitioned_data_single, dim=0)
+        partitioned_data.append(partitioned_data_single)
+
+    partitioned_data = torch.stack(partitioned_data, dim=0)
     return partitioned_data
 
 def partition_adv_sessions_by_ipd(adv_sessions, delta, win_size,n_wins, tor_len, device):
@@ -531,7 +593,7 @@ def partition_adv_sessions_by_ipd(adv_sessions, delta, win_size,n_wins, tor_len,
 
             # 将 IPD 和 size 数据连接在一起
             window = torch.cat([window_ipd, window_size])
-
+                
             # 如果窗口内的数据不足，填充零
             if window.shape[0] < tor_len * 2:
                 padding = torch.zeros(tor_len * 2 - window.shape[0]).to(device)
@@ -671,7 +733,7 @@ class Exp_Main(Exp_Basic):
         
         train_steps  = (np.reshape(train_data_win['train_tor'], [-1, tor_len*2]).astype('float32').shape[0])//batch_size+1
         
-        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+        # early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -766,7 +828,8 @@ class Exp_Main(Exp_Basic):
                 adv_sessions = reconstruct_adv_preds(adv_preds, batch_sessions, seq_len, pred_len, stride, len_sessions) #将扰动添加到batch_sessions中
                 
                 #生成扰动后的样本
-                Gxa_batch = partition_adv_sessions_differentiable(adv_sessions, delta, win_size,n_wins, tor_len, device = self.device)    
+                # Gxa_batch = partition_adv_sessions_by_ipd(adv_sessions, delta, win_size,n_wins, tor_len, device = self.device)  
+                Gxa_batch = partition_adv_sessions_differentiable(adv_sessions, delta, win_size,n_wins, tor_len, device = self.device)   
 
                 #Ga_out: [batch_size*n_wins, emb_size], p_out: [batch_size*n_wins, emb_size]
 
@@ -797,30 +860,11 @@ class Exp_Main(Exp_Basic):
 
                 total_time_rate.append(time_rate.item())
                 total_size_rate.append(size_rate.item())
-                # ###############################################################
-                # ###           新增的可视化代码（只在第一个batch执行）         ###
-                # ###############################################################
-                # if i == 0:
-                #     print("\n[INFO] 正在为第一个批次生成计算图...")
 
-                #     # 使用 make_dot 生成计算图
-                #     # 它会从 loss 开始，反向追溯所有依赖项
-                #     # params 参数会高亮显示 generator 的权重，方便观察
-                #     graph = make_dot(loss, params=dict(self.generator.named_parameters()))
-
-                #     # 将图保存为PDF文件
-                #     graph.render("exp_main_computation_graph", format="pdf", cleanup=True)
-
-                #     print("[SUCCESS] 计算图已成功保存为 'exp_main_computation_graph.pdf'")
-                #     print("[INFO] 您现在可以打开此PDF文件查看计算图。\n")
-                # ###############################################################
-                # ###                       新增代码结束                        ###
-                # ###############################################################
                     
                 loss.backward()
                 model_optim.step()
                 # scheduler_oclr.step()
-                print('Batch: {0},session_idx:{1} \nLoss: {2}, Cosine Loss: {3}, Time L2 distance rate: {4}, Size L2 Distance rate: {5}'.format(i,idx, loss.item(), cosine_loss.item(), time_rate.item(), size_rate.item()))
                 # if(epoch >3 and cosine_loss.item() < 0.8 and time_rate <0.13 and size_rate <0.15):
                 #     torch.save({
                 #         'epoch': epoch + 1,
@@ -844,22 +888,22 @@ class Exp_Main(Exp_Basic):
             meansizeL2_rate = np.mean(total_size_rate)
             
             print("Epoch: {0},Loss: {1}, Cosine Loss: {2}, Time L2 rate: {3}, Size L2 rate: {4}\n".format(epoch + 1, meanloss, meancosine_loss, meantimeL2_rate, meansizeL2_rate))
-            if(meancosine_loss < 0.80 and meantimeL2_rate <0.15 and meansizeL2_rate <0.15):
-                torch.save({
-                    'epoch': epoch + 1,
-                    'meancos_loss': meancosine_loss-0.5,
-                    'Time L2 rate':meantimeL2_rate,
-                    'Size L2 rate':meansizeL2_rate,
-                    'generator_state_dict': self.generator.state_dict(),
-                    'optimizer_state_dict': model_optim.state_dict(),
-                    'loss': meanloss,
-                    'beta': beta,
-                    'alpha': alpha, 
-                    'gamma': gamma 
-                }, os.path.join(path, f'generator_checkpoint_{epoch + 1}_cos{meancosine_loss-0.5:.3f}_advipd{meantimeL2_rate:.3f}_advsize{meansizeL2_rate:.3f}.pth'))
+            # if(meancosine_loss < 0.80 and meantimeL2_rate <0.15 and meansizeL2_rate <0.15):
+            #     torch.save({
+            #         'epoch': epoch + 1,
+            #         'meancos_loss': meancosine_loss-0.5,
+            #         'Time L2 rate':meantimeL2_rate,
+            #         'Size L2 rate':meansizeL2_rate,
+            #         'generator_state_dict': self.generator.state_dict(),
+            #         'optimizer_state_dict': model_optim.state_dict(),
+            #         'loss': meanloss,
+            #         'beta': beta,
+            #         'alpha': alpha, 
+            #         'gamma': gamma 
+            #     }, os.path.join(path, f'generator_checkpoint_{epoch + 1}_cos{meancosine_loss-0.5:.3f}_advipd{meantimeL2_rate:.3f}_advsize{meansizeL2_rate:.3f}.pth'))
 
                 # 打印保存信息
-                print(f"Checkpoint saved at epoch {epoch + 1}")
+                # print(f"Checkpoint saved at epoch {epoch + 1}")
             
             # self.test()
             
@@ -1049,137 +1093,3 @@ class Exp_Main(Exp_Basic):
                     
             print('Time L2 distance rate: {0}, Size L2 Distance rate: {1}'.format(meantimeL2_rate.item(), meansizeL2_rate.item()))
             print('Cosine Similarity: {0}, G Cosine Similarity: {1}'.format(sim, Gsim))
-            
-            
-            
-    #用于生成用于计算开销的文件
-    # def test(self, setting):
-        
-    #     pred_len = self.args.pred_len
-    #     seq_len = self.args.seq_len
-    #     stride = self.args.stride
-        
-    #     delta = self.delta
-    #     win_size = self.win_size
-    #     n_wins = self.n_wins
-    #     threshold = self.threshold
-    #     tor_len = self.tor_len
-    #     exit_len = self.exit_len
-
-    #     n_test = self.n_test
-    #     emb_size = self.emb_size
-    #     batch_size = self.batch_size
-        
-    #     path = os.path.join(self.args.checkpoints, setting)
-    #     if not os.path.exists(path):
-    #         os.makedirs(path)
-            
-    #     state_dict = torch.load(os.path.join(self.args.target_model_path,'best_loss.pth'), map_location=self.device)
-        
-    #     # --- 修改这里: 指向您训练好的生成器模型 ---
-    #     generator_path = 'checkpoints/deepcoffea/deepcoffea_d3_ws5_nw11_thr20_tl500_el800_nt1000_ap1e-01_es64_lr1e-03_mep100000_bs256/deepcoffea_PatchTST_Deepcoffea_sl150_pl70_dm512_nh8_pal10_s70/generator_checkpoint_16_cos0.163_advipd0.149_advsize0.005.pth'
-    #     generator_state_dict = torch.load(generator_path, map_location=self.device)
-        
-    #     anchor = self.target_model_anchor
-    #     pandn = self.target_model_pandn
-    #     generator = self.generator
-        
-    #     anchor.load_state_dict(state_dict['anchor_state_dict'])
-    #     pandn.load_state_dict(state_dict['pandn_state_dict'])
-    #     generator.load_state_dict(generator_state_dict['generator_state_dict'])
-        
-    #     anchor.eval()
-    #     pandn.eval()
-    #     generator.eval()
-                
-    #     data_path=pathlib.Path(self.args.data_path)
-    #     test_path = data_path / "filtered_and_partitioned" / f"d{delta}_ws{win_size}_nw{n_wins}_thr{threshold}_tl{tor_len}_el{exit_len}_nt{n_test}_test.npz"
-    #     test_session_path = data_path / "filtered_and_partitioned" / f"d{delta}_ws{win_size}_nw{n_wins}_thr{threshold}_tl{tor_len}_el{exit_len}_nt{n_test}_test_session.npz"
-        
-    #     test_data_win = np.load(test_path)
-    #     test_data_session = np.load(test_session_path, allow_pickle=True)
-            
-    #     test_set = DeepCoffeaDataset(test_data_win, train=False)
-    #     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, drop_last=True) # shuffle=False for consistency
-
-    #     # --- 新增: 用于保存所有会话的列表 ---
-    #     all_original_sessions = []
-    #     all_adv_sessions = []
-        
-    #     total_time_rate = []
-    #     total_size_rate = [] 
-                
-    #     with torch.no_grad():
-    #         # 限制测试的批次数，以便快速得到结果，您可以根据需要调整或移除
-    #         num_batches_to_test = 20
-            
-    #         for i, (idx, xa_batch, xp_batch) in tqdm(enumerate(test_loader), total=num_batches_to_test, ncols=120):
-    #             if i >= num_batches_to_test:
-    #                 break
-                
-    #             # --- (原有的数据准备和扰动生成代码保持不变) ---
-    #             idx = [int(x) for x in idx]
-    #             batch_session_ipd = test_data_session['tor_ipds'][idx]
-    #             batch_session_size = test_data_session['tor_sizes'][idx]
-    #             batch_session_ipd = [torch.tensor(tensor).to(self.device) for tensor in batch_session_ipd]
-    #             batch_session_size = [torch.tensor(tensor).to(self.device) for tensor in batch_session_size]
-                
-    #             seq_batches, pred_batches, len_sessions, batch_sessions = [], [], [], []
-                
-    #             for j in range(batch_size):
-    #                 len_session = len(batch_session_ipd[j])
-    #                 batch_session = torch.stack([batch_session_ipd[j], batch_session_size[j]], dim=0)
-    #                 seq_batch, pred_batch = split_time_series(batch_session, seq_len=seq_len, pred_len=pred_len, stride=stride, device=self.device)
-    #                 seq_batches.append(seq_batch)
-    #                 pred_batches.append(pred_batch)
-    #                 len_sessions.append(len_session)
-    #                 batch_sessions.append(batch_session)
-                    
-    #             seq_batches = torch.cat(seq_batches, dim=0)
-    #             pred_batches = torch.cat(pred_batches, dim=0)
-    #             z = seq_batches.float()
-                
-    #             perturbation = generator(z)
-    #             constraint_perturbation = perturbation.clone()
-    #             constraint_ipd = torch.abs(perturbation[:, 0, :])
-    #             constraint_size = torch.abs(perturbation[:, 1, :])
-    #             constraint_perturbation[:, 0, :] = constraint_ipd
-    #             constraint_perturbation[:, 1, :] = constraint_size
-    #             adv_preds = torch.sign(pred_batches) * (torch.abs(pred_batches) + constraint_perturbation)
-    #             adv_sessions = reconstruct_adv_preds(adv_preds, batch_sessions, seq_len, pred_len, stride, len_sessions)
-
-    #             # --- 新增: 收集原始会话和对抗会话 ---
-    #             all_original_sessions.extend(batch_sessions)
-    #             all_adv_sessions.extend(adv_sessions)
-
-    #             # --- (原有的L2 rate计算代码保持不变) ---
-    #             ipdl2_distances = torch.stack([torch.linalg.norm(p - o, ord=2, dim=-1) for p, o in zip([row[0] for row in adv_sessions], batch_session_ipd)])
-    #             sizel2_distances = torch.stack([torch.linalg.norm(p - o, ord=2, dim=-1) for p, o in zip([row[1] for row in adv_sessions], batch_session_size)])
-    #             time0L2 = torch.stack([torch.linalg.norm(x, ord=2, dim=-1) for x in batch_session_ipd])
-    #             size0L2 = torch.stack([torch.linalg.norm(x, ord=2, dim=-1) for x in batch_session_size])
-    #             time_rate = (ipdl2_distances / time0L2).mean()
-    #             size_rate = (sizel2_distances / size0L2).mean()
-    #             total_time_rate.append(time_rate.item())
-    #             total_size_rate.append(size_rate.item())
-
-    #     meantimeL2_rate = np.mean(total_time_rate)
-    #     meansizeL2_rate = np.mean(total_size_rate)
-        
-    #     print("\n--- 测试完成 ---")
-        
-    #     # 将列表中的Tensor移动到CPU，方便后续处理
-    #     all_original_sessions_cpu = [s.cpu() for s in all_original_sessions]
-    #     all_adv_sessions_cpu = [s.cpu() for s in all_adv_sessions]
-        
-    #     result_filepath = os.path.join(f'EfficiencyEvaluation/deepcoffea_sessions_for_overhead_calc.p')
-    #     with open(result_filepath, "wb") as fp:
-    #         results_to_save = {
-    #             "adv_sessions": all_adv_sessions_cpu,
-    #             "original_sessions": all_original_sessions_cpu
-    #         }
-    #         pickle.dump(results_to_save, fp)
-        
-    #     print(f"\n--- 扰动数据已保存 ---")
-    #     print(f"文件位置: {result_filepath}")
-    #     print(f"共保存了 {len(all_adv_sessions_cpu)} 个会话的数据。")
-    #     print("您现在可以使用开销计算脚本来分析此文件。")

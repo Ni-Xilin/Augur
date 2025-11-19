@@ -46,10 +46,10 @@ for result_fpath in [result_fpath, Gresult_fpath, result_fpath_time0, result_fpa
 plt.rcParams.update({'font.size': 30})
 plt.figure(figsize=(8, 6))
 plt.xscale('log')
-plt.plot(fpr_list[0], tpr_list[0], color='#1f77b4', lw=2.5, label=f'No', marker='.', linestyle='-', markersize=10)  # 蓝色
-plt.plot(fpr_list[2], tpr_list[2], color='#ff7f0e', lw=2.5, label=f'size', marker='.', linestyle='-', markersize=10)
-plt.plot(fpr_list[3], tpr_list[3], color='#2ca02c', lw=2.5, label=f'Time', marker='.', linestyle='-', markersize=10)
-plt.plot(fpr_list[1], tpr_list[1], color='#FF0000', lw=2.5, label=f'Both', marker='.', linestyle='-', markersize=10)
+plt.plot(fpr_list[0], tpr_list[0], color='#1f77b4', lw=2.5, label=f'No',markerfacecolor='white', marker='s', linestyle='-', markersize=12.5)  # 蓝色
+plt.plot(fpr_list[2], tpr_list[2], color='#ff7f0e', lw=2.5, label=f'size',markerfacecolor='white',marker='d', linestyle='-', markersize=12.5)
+plt.plot(fpr_list[3], tpr_list[3], color='#2ca02c', lw=2.5, label=f'Time', markerfacecolor='white',marker='v', linestyle='-', markersize=12.5)
+plt.plot(fpr_list[1], tpr_list[1], color='#FF0000', lw=2.5, label=f'Both',markerfacecolor='white', marker='o', linestyle='-', markersize=12.5)
 
 
 

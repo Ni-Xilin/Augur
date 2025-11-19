@@ -106,7 +106,7 @@ if __name__ == '__main__':
     args = SimpleNamespace()
 
     # --- 测试控制参数 ---
-    args.footprint_duration_sec = 10 # 测量资源足迹的持续时间（秒）
+    args.footprint_duration_sec = 1 # 测量资源足迹的持续时间（秒）
 
     # --- 模型架构参数 (必须与 run_mdeepcorr.py 和加载的模型完全一致) ---
     args.seq_len = 96

@@ -12,7 +12,7 @@ if __name__ == '__main__':
     parser.add_argument('--random_seed', type=int, default=2025, help='random seed')
     
     # basic configbatch_size
-    parser.add_argument('--is_training', type=int,  default=0, help='status')
+    parser.add_argument('--is_training', type=int,  default=1, help='status')
     parser.add_argument('--model_id', type=str,  default='mdeepcorr', help='model id')
     parser.add_argument('--model', type=str,  default='PatchTST',
                         help='model name, options: [PatchTST]')
@@ -37,31 +37,20 @@ if __name__ == '__main__':
     parser.add_argument('--patch_len', type=int, default=4, help='patch length')
     parser.add_argument('--stride', type=int, default=48, help='stride')
     parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
-    parser.add_argument('--decomposition', type=int, default=0, help='decomposition; True 1 False 0')
-    parser.add_argument('--kernel_size', type=int, default=25, help='decomposition-kernel')
     parser.add_argument('--individual', type=int, default=1, help='individual head; True 1 False 0')
     parser.add_argument('--Dtarget', type=int, default=1, help='adv type(define loss)')
     parser.add_argument('--depth', type=int, default=3, help='number of encoder layers')
     parser.add_argument('--scale_factor', type=int, default=2, help='scale factor')
     parser.add_argument('--n_layers', type=int, default=2, help='number of layers for each block')
     parser.add_argument('--att_dropout', type=float, default=0.0, help='head dropout')
-    # RevIN
-    parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
-    parser.add_argument('--affine', type=int, default=0, help='RevIN-affine; True 1 False 0')
-    parser.add_argument('--subtract_last', type=int, default=0, help='0: subtract mean; 1: subtract last')
     
     # Formers 
-    # parser.add_argument('--embed_type', type=int, default=0, help='0: default 1: value embedding + temporal embedding + positional embedding 2: value embedding + temporal embedding 3: value embedding + positional embedding 4: value embedding')
     parser.add_argument('--enc_in', type=int, default=4, help='feature num') 
-    # parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
-    # parser.add_argument('--c_out', type=int, default=7, help='output size')
     parser.add_argument('--d_model', type=int, default=512, help='dimension of model')
     parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
     parser.add_argument('--d_ff', type=int, default=1024, help='dimension of fcn')
     parser.add_argument('--factor', type=int, default=1, help='attn factor')
     parser.add_argument('--activation', type=str, default='gelu', help='activation')
-    parser.add_argument('--output_attention', action='store_true', help='whether to output attention in ecoder')
-    parser.add_argument('--do_predict', action='store_true', help='whether to predict unseen future data')
     
     # optimization
     parser.add_argument('--num_workers', type=int, default=32, help='data loader num workers')
@@ -77,8 +66,6 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', type=int, default=0, help='main gpu')
     parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
     parser.add_argument('--devices', type=str, default='0', help='device ids of multile gpus')
-    #用于计算和打印给定模型的参数数量和计算复杂度（FLOPs），用于评估模型的复杂性和性能
-    parser.add_argument('--test_flop', action='store_true', default=False, help='See utils/tools for usage')
 
     args = parser.parse_args()
 

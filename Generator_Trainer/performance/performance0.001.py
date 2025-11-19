@@ -191,6 +191,8 @@ result_fpath5 = pathlib.Path("baseline/PGD/deepcoffea/PGDcorrmatrix.npz")
 result_fpath6 = pathlib.Path("target_model/deepcoffea/code/corrmatrix_sim0.7404.npz")
 result_fpath7 = pathlib.Path("target_model/deepcoffea/code/Gcorrmatrix_time0.1398_size0.0038_sim0.1945.npz")
 result_fpath8 = pathlib.Path("baseline/RM/deepcoffea/RMcorrmatrix.npz")
+result_fpath9 = pathlib.Path("datasets_convert/deepcoffea_d3_ws5_nw11_thr20_tl500_el800_nt1000_ap1e-01_es64_lr1e-03_mep100000_bs256/deepcoffea_PatchTST_Deepcoffea_sl150_pl70_dm512_nh8_pal10_s70/Gcorr_matrix_reverted_sim_0.4813_samples500.npz")
+
 
 reuslt_metrics = pathlib.Path("performance/deepcoffea_metrics0.001.p")
 if reuslt_metrics.exists():
@@ -206,7 +208,7 @@ if reuslt_metrics.exists():
 else:
     deepcoffea_perfomance = []
     for result_fpath in [result_fpath1, result_fpath2,result_fpath3, result_fpath4,
-                        result_fpath5,result_fpath6, result_fpath7,result_fpath8]:
+                        result_fpath5, result_fpath6, result_fpath7,result_fpath8,result_fpath9]:
         loaded = np.load(result_fpath,allow_pickle=True)
         corr_matrix = loaded['corr_matrix']
         if(result_fpath.name == "corrmatrix_sim0.7404.npz"):
@@ -215,6 +217,8 @@ else:
             metrics = deepcoffea_calculate_metrics_at_fpr(corr_matrix,threshhold_start=0.18,threshhold_end=0.16,n_wins=11, vote_thr=9,target_fpr=0.001)
         elif(result_fpath.name == "CWcorrmatrix.npz"):
             metrics = deepcoffea_calculate_metrics_at_fpr(corr_matrix,threshhold_start=0.19,threshhold_end=0.17,n_wins=11, vote_thr=9,target_fpr=0.001)
+        elif(result_fpath.name == "Gcorr_matrix_reverted_sim_0.4813_samples500.npz"):
+            metrics = deepcoffea_calculate_metrics_at_fpr(corr_matrix,threshhold_start=0.41,threshhold_end=0.40,n_wins=11, vote_thr=9,target_fpr=0.001)
         else:
             metrics = deepcoffea_calculate_metrics_at_fpr(corr_matrix,threshhold_start=0.252,threshhold_end=0.21,n_wins=11, vote_thr=9,target_fpr=0.001)
 
